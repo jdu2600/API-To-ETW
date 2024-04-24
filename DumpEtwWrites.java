@@ -1,8 +1,5 @@
 
-/* ###
- * IP: jdu2600
- * IP: GHIDRA
- *
+/*
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -25,6 +22,7 @@
 // All APIs take the same parameters... so this script should work everywhere. :-)
 //
 //@category Functions.ETW
+//@author jdu2600
 
 import java.io.*;
 import java.nio.file.*;
@@ -32,6 +30,7 @@ import java.util.*;
 import java.util.stream.*;
 import generic.stl.Pair;
 
+import docking.options.OptionsService;
 import ghidra.app.cmd.function.*;
 import ghidra.app.decompiler.*;
 import ghidra.app.script.*;
@@ -43,19 +42,30 @@ import ghidra.program.model.data.*;
 import ghidra.program.model.listing.*;
 import ghidra.program.model.pcode.*;
 import ghidra.program.model.symbol.*;
+import ghidra.program.model.util.*;
 import ghidra.util.exception.*;
+
 
 public class DumpEtwWrites extends GhidraScript {
 
-	private Boolean quickScan = false;	// stop processing after maxEvents have been found, or maxCallDepth/maxExportCallDepth has been reached
+	// **********************
+	// Configurable Settings
+	// quickscan: stop processing after maxEvents have been found, or maxCallDepth/maxExportCallDepth has been reached
+	private Boolean quickScan = true;
+	// maxEvents: maximum events to report per API
 	private int maxEvents = 10;
-	private int maxCallDepth = 7;
-	private int maxExportCallDepth = 1;
+	// maxCallDepth: maximum call depth to search for events
+	private int maxCallDepth = 10;
+	// maxExportCallDepth: maximum depth of exported functions to search
+	private int maxExportCallDepth = 2;
+	// debugPrint: verbose logging
+	private Boolean debugPrint = false;
+	// decompileTimeoutSeconds: per-function timeout for Ghidra decompilation
+	private int decompileTimeoutSeconds = 60;
+	// **********************
 
 	private String functionsFile = "functions.txt"; // analyse these functions
 	private String ignoreFile = "ignore.txt";       // ignore these functions
-
-	private Boolean debugPrint = true;
 
 	private DataType eventDescriptorType = null;
 	private DataType ucharType = null;
@@ -63,7 +73,6 @@ public class DumpEtwWrites extends GhidraScript {
 	private DataType ulonglongType = null;
 	private DataType guidType = null;
 	private DecompInterface decomplib = null;
-
 
 	private Set<String> exports = null;
 	private Set<String> functions = null;
@@ -78,6 +87,10 @@ public class DumpEtwWrites extends GhidraScript {
     	printf("\n\n--==[ DumpEtwWrites ]==--\n");
 	    printf(" * %s\n", currentProgram.getName());
     	
+    	// override default maxExportCallDepth if we are analysing all export
+	    if(!Files.exists(Paths.get(functionsFile)))
+			maxExportCallDepth = 1;
+
 	    if(quickScan)
 	    	printf(" * quick scan mode - maxEvents=%d maxCallDepth=%d maxExportCallDepth=%d\n", maxEvents, maxCallDepth, maxExportCallDepth);
 	    else
@@ -102,6 +115,7 @@ public class DumpEtwWrites extends GhidraScript {
 	    catch(Exception e) {
 	    	printf(" * %s not provided - analysing all exports instead\n", functionsFile);
 	    	functions = exports;
+			Files.write(FileSystems.getDefault().getPath("exports.txt"), exports);
 	    }
 	    
 	    // optionally provide a list of functions you want to ignore
@@ -109,7 +123,7 @@ public class DumpEtwWrites extends GhidraScript {
 	    try {
 	    	ignored = new HashSet<String>(Files.readAllLines(Paths.get(ignoreFile)));
 	    	printf(" * ignoring %d functions\n", ignored.size());
-	    } 
+	    }
 	    catch(Exception e) 
 	    {
 	    	ignored = new HashSet<String>();
@@ -156,7 +170,6 @@ public class DumpEtwWrites extends GhidraScript {
 		            analyseEtwRegisterCall(ref);
 		        }
         	}
-
         	
 	        /* now for each function, output the parameters of all ETW writes ( GUID, Event Id etc)
 	         */
@@ -201,9 +214,15 @@ public class DumpEtwWrites extends GhidraScript {
         
         // skip 'data' references - e.g. import / export offsets 
         Data refData = getDataAt(refAddr);
-        if (refData != null && (refData.getDataType().isEquivalent(new ImageBaseOffset32DataType()) || refData.getDataType().isEquivalent(new DWordDataType()))) 
+        if (refData == null)
+			refData = getDataContaining(refAddr);
+		if (refData != null && 
+				(refData.getDataType().toString().startsWith("_IMAGE_RUNTIME_FUNCTION_ENTRY") ||
+				refData.getDataType().toString().startsWith("GuardCfgTableEntry") ||
+		         refData.getDataType().isEquivalent(new IBO32DataType()) ||
+				 refData.getDataType().isEquivalent(new DWordDataType()))) 
         	return;
-        		
+        
         Function refFunc = currentProgram.getFunctionManager().getFunctionContaining(refAddr);
         if (refFunc == null) {
         	int transactionID = currentProgram.startTransaction("attempting findFunctionEntry()");
@@ -216,7 +235,7 @@ public class DumpEtwWrites extends GhidraScript {
         	// programmatic resolution failed - user should try manually finding and defining the function
         	throw new NotFoundException("getFunctionContaining == null; refAddr=" + refAddr); 
         
-		ClangTokenGroup cCode = decomplib.decompileFunction(refFunc, decomplib.getOptions().getDefaultTimeout(), monitor).getCCodeMarkup();
+		ClangTokenGroup cCode = decomplib.decompileFunction(refFunc, decompileTimeoutSeconds, monitor).getCCodeMarkup();
         if (cCode == null)
         	throw new Exception("[CALL EtwRegister] Decompile Error: " + decomplib.getLastMessage());
         
@@ -243,15 +262,15 @@ public class DumpEtwWrites extends GhidraScript {
         	ClangStatement stmt = (ClangStatement) astNode;
         	PcodeOp pcodeOp = stmt.getPcodeOp();
         	if (pcodeOp.getOpcode() == PcodeOp.CALL) {        	
+        		long callAddress = astNode.getMaxAddress().getOffset();
         		String etwRegisterCall = getFunctionAt(pcodeOp.getInput(0).getAddress()).getName();
-        		
         		if(etwRegisterCall.endsWith("NotificationRegister")) {
         			// NTSTATUS EtwNotificationRegister (LPCGUID Guid, ULONG Type, PETW_NOTIFICATION_CALLBACK Callback, PVOID Context, PREGHANDLE RegHandle);
 		    		throw new NotYetImplementedException(etwRegisterCall);
     			}
         		
         		if(pcodeOp.getNumInputs() < 5) {
-	        		printf("[WARNING] Incomplete Decompilation @ 0x%x - %s\n", astNode.getMaxAddress().getOffset(),  stmt.toString());
+	        		printf("[WARNING] Incomplete Decompilation @ 0x%x - %s\n", callAddress,  stmt.toString());
 	        		return false;
 	        	}
 	        	
@@ -268,7 +287,7 @@ public class DumpEtwWrites extends GhidraScript {
 	        		pGuids = resolveFunctionParameterToConstant(pcodeOp, 1, callingFunc);
 	        		reghandles = resolveFunctionParameterToConstant(pcodeOp, 4, callingFunc);
 	        	 } catch (NotFoundException e) {	        		
-	        		printf("   --> skipping %s due to local variable storage\n", etwRegisterCall);
+	        		printf("   --> skipping %s due to local variable storage @ 0x%x\n", etwRegisterCall, callAddress);
 	        		return true;
 	        	}
 
@@ -341,6 +360,14 @@ public class DumpEtwWrites extends GhidraScript {
 	    	
 	    	String funcName = thisFunction.getName();
 	    	
+	    	String containingFunction = callingFunction.getName();
+    		if( containingFunction.startsWith("FUN_")) {
+    			// Search for the first symbol in the call stack
+    			Stack<Function> stack = (Stack<Function>) callPath.clone();
+    			while(containingFunction.startsWith("FUN_"))
+    				containingFunction = stack.pop().getName();
+    		}
+	    	
 	    	if (processed.contains(funcName) || ignored.contains(funcName))
         		continue;
 	    		    	
@@ -348,13 +375,10 @@ public class DumpEtwWrites extends GhidraScript {
     			continue;
 	    	
         	if(etwRegisterFuncs.contains(funcName)) {
-        		printf("   --> %s()\n", funcName);  // :TODO: handle local calls to EtwRegister...
+        		logTODO("handle local calls to EtwRegister - " + funcName);
         	}
         	else if(funcName.startsWith("_TlgWrite")) {
         		logTODO("implement TraceLogging support");
-        		String containingFunction = callingFunction.getName();
-        		if( containingFunction.startsWith("FUN_"))
-        			containingFunction = "";
         		csv.printf("%s,???,,,%s,,???,,,,,,,%s,%d,%d,%s\n", func.getName(), funcName, containingFunction, depth, exportDepth, callPath.toString().replace(',','-').replace(' ','>') );
         	}
         	else if(classicEventFuncs.contains(funcName)) {
@@ -366,12 +390,12 @@ public class DumpEtwWrites extends GhidraScript {
         		List<String> wppWriteParametersList = getWppWriteParameters(funcName, callingFunction, callPath);
         		for(String wppWriteParameters : wppWriteParametersList) {
             		printf("   --> %s(%s)\n", funcName, wppWriteParameters);
-        			csv.printf("%s,%s,%s,%d,%d,%s\n", func.getName(), wppWriteParameters, callingFunction.getName(), depth, exportDepth, callPath.toString().replace(',','-').replace(' ','>') );
+        			csv.printf("%s,%s,%s,%d,%d,%s\n", func.getName(), wppWriteParameters, containingFunction, depth, exportDepth, callPath.toString().replace(',','-').replace(' ','>') );
         			eventCount++;
         		}
         	}
         	else if(etwWriteFuncs.contains(funcName)) {
-    			ClangTokenGroup cCode = decomplib.decompileFunction(callingFunction, decomplib.getOptions().getDefaultTimeout(), monitor).getCCodeMarkup();
+    			ClangTokenGroup cCode = decomplib.decompileFunction(callingFunction, decompileTimeoutSeconds, monitor).getCCodeMarkup();
     	        if (cCode == null)
     	        	throw new Exception("[CALL EtwWrite] Decompile Error: " + decomplib.getLastMessage());
     	        List<StringBuffer> etwWriteParametersList = new LinkedList<StringBuffer>();
@@ -382,12 +406,8 @@ public class DumpEtwWrites extends GhidraScript {
                 		if(etwWriteParameters.toString().equals(lastParameters))
                 			continue; // remove duplicates
                 		lastParameters = etwWriteParameters.toString();
-                		
                 		printf("   --> %s(%s)\n", funcName, etwWriteParameters);
-                		if(lastParameters.endsWith(","))
-        	    			throw new Exception("recovered bad parameters - @ 0x" + thisFunction.getEntryPoint().toString());
-
-                		csv.printf("%s,%s,%s,%d,%d,%s\n", func.getName(), etwWriteParameters, callingFunction.getName(), depth, exportDepth, callPath.toString().replace(',','-').replace(' ','>') );
+                		csv.printf("%s,%s,%s,%d,%d,%s\n", func.getName(), etwWriteParameters, containingFunction, depth, exportDepth, callPath.toString().replace(',','-').replace(' ','>') );
 	                	eventCount++;
                 	}
                 } catch(NotYetImplementedException e) {
@@ -530,13 +550,16 @@ public class DumpEtwWrites extends GhidraScript {
 		        		etwWriteParameters.append(eventDescriptorSymbol + ",");
 		        		event = toAddr(pEvent);
 		    			clearListing(event, event.add(eventDescriptorType.getLength()-1));
-		    			createData(event, eventDescriptorType);
-		    			appendStructure(event, etwWriteParameters, true);
+		    			try {
+		    				createData(event, eventDescriptorType);
+		    				appendStructure(event, etwWriteParameters, true);
+		    			}
+		    			catch(CodeUnitInsertionException e)
+		    			{
+		    				debugPrintf("EVENT_DESCRIPTOR parsing failed @ 0x%x", pEvent);
+		    				etwWriteParameters.append(",,,,,,");
+		    			}
 		    			etwWriteParametersList.add(etwWriteParameters);
-
-		    			if(etwWriteParameters.toString().endsWith(",")) {
-	        				throw new NotFoundException("EVENT_DESCRIPTOR parsing failed @ " + pEvent);
-	        			}
 	        		}	        		
 	        	}		    			    
 		    	found = true;
@@ -556,7 +579,7 @@ public class DumpEtwWrites extends GhidraScript {
     
     private List<String> getWppWriteParameters(String wppWriteCall, Function callingFunction, Stack<Function> callPath) throws Exception {
     	
-		HighFunction hf = decomplib.decompileFunction(callingFunction, decomplib.getOptions().getDefaultTimeout(), monitor).getHighFunction();
+		HighFunction hf = decomplib.decompileFunction(callingFunction, decompileTimeoutSeconds, monitor).getHighFunction();
         if (hf == null)
         	throw new Exception("[CALL WppWrite] Decompile Error: " + decomplib.getLastMessage());
 
@@ -620,8 +643,8 @@ public class DumpEtwWrites extends GhidraScript {
         return wppWriteParametersList; 
     }
     
+    // resolve an intermediate pcode call parameter to a list of possible constant values 
     public List<Long> resolveFunctionParameterToConstant(PcodeOp call, int paramIndex, Stack<Function> callPath) throws Exception {
-//    	debugPrintf("resolveFunctionParameterToConstant(%d)\n", paramIndex);
 		if (call.getOpcode() != PcodeOp.CALL)
 			throw new InvalidInputException("Expected a CALL function");
 
@@ -640,6 +663,7 @@ public class DumpEtwWrites extends GhidraScript {
 		return resolveVarnodeToConstant(param, callPath, 0);
 	}
     
+    // resolve a variable to a list of possible constant values
     private List<Long> resolveVarnodeToConstant(Varnode node, Stack<Function> callPath, int astDepth) throws Exception {
     	if (node.isConstant())
 			return new LinkedList<Long>(Arrays.asList(node.getOffset()));
@@ -663,6 +687,7 @@ public class DumpEtwWrites extends GhidraScript {
     	return resolvePcodeOpToConstant(node.getDef(), callPath, astDepth);
     }
     
+    // resolve a function call parameter to a list of possible constant values
     private List<Long> resolveToConstant(int parameterIndex, Stack<Function> callPath) throws Exception {
     	List<Long> constants = new LinkedList<Long>();
     	
@@ -670,14 +695,14 @@ public class DumpEtwWrites extends GhidraScript {
     	Function func = parentCallPath.pop();
     	if (callPath.size() > 1) {
     		// forward trace - with full call path
-    		ClangNode astNode = decomplib.decompileFunction(parentCallPath.peek(), decomplib.getOptions().getDefaultTimeout(), monitor).getCCodeMarkup();
+    		ClangNode astNode = decomplib.decompileFunction(parentCallPath.peek(), decompileTimeoutSeconds, monitor).getCCodeMarkup();
 	        if (astNode == null)
 	        	throw new Exception("[resolveToConstant] Decompile Error: " + decomplib.getLastMessage());
 	        constants.addAll(resolveToConstant(astNode, func, parameterIndex, parentCallPath, 0));
     	} else {
 	    	// backwards trace - incomplete call path, follow all paths
 	    	for(Function callingFunction : func.getCallingFunctions(monitor)) {	
-		    	ClangNode astNode = decomplib.decompileFunction(callingFunction, decomplib.getOptions().getDefaultTimeout(), monitor).getCCodeMarkup();
+		    	ClangNode astNode = decomplib.decompileFunction(callingFunction, decompileTimeoutSeconds, monitor).getCCodeMarkup();
 		        if (astNode == null)
 		        	throw new Exception("[resolveToConstant] Decompile Error: " + decomplib.getLastMessage());	
 		        parentCallPath.push(callingFunction);
@@ -689,22 +714,34 @@ public class DumpEtwWrites extends GhidraScript {
     	if (constants.size() == 0)
     		throw new NotFoundException("resolveToConstant(parameter)");
     	
-    	return constants;    		
+    	return constants;
     }
     
+    // resolve a high level C statement to a list of possible constant values
     private List<Long> resolveToConstant(ClangNode astNode, Function func, int parameterIndex, Stack<Function> callPath, int nodeDepth) throws Exception {
     	List<Long> constants = new LinkedList<Long>();
     	
     	// find the call(s) to func - and back trace all possible parameter values
     	if(astNode instanceof ClangStatement) {
 			ClangStatement stmt = (ClangStatement) astNode;
-			PcodeOp pcodeOp = stmt.getPcodeOp();			
+			PcodeOp pcodeOp = stmt.getPcodeOp();	
 			if (pcodeOp != null &&
-			pcodeOp.getOpcode() == PcodeOp.CALL && 
-			getFunctionAt(pcodeOp.getInput(0).getAddress()) != null &&	
-			getFunctionAt(pcodeOp.getInput(0).getAddress()).getName().equals(func.getName())) {
-		    	if(parameterIndex >= pcodeOp.getNumInputs())
-		    		throw new ArrayIndexOutOfBoundsException(func.getName() + "() parameterIndex=" + parameterIndex);
+				pcodeOp.getOpcode() == PcodeOp.CALL && 
+				getFunctionAt(pcodeOp.getInput(0).getAddress()) != null &&	
+				getFunctionAt(pcodeOp.getInput(0).getAddress()).getName().equals(func.getName()))
+			{
+				if(parameterIndex >= pcodeOp.getNumInputs()) {
+		    		// After porting to Ghidra 11 this condition is triggering when it shouldn't.
+					// Recovering programmatically appears to require invalidate the existing 
+					// decompilation result so isn't trivial.
+					// Print (likely) manual recovery instructions for now.
+					printf("Navigate to " + pcodeOp.getInput(0).getAddress() + " " + stmt + "\n");
+					printf("P 'Commit Params/Return' for this function and retry\n");
+					printf("Or try Auto Analyze again if it keeps happening\n");
+					throw new ArrayIndexOutOfBoundsException(astNode.getMinAddress() + " CALL " +
+							stmt + " parameterIndex=" + parameterIndex + 
+							" of " + (pcodeOp.getNumInputs() - 1));
+				}
 		    	constants.addAll(resolveVarnodeToConstant(pcodeOp.getInput(parameterIndex), callPath, 0));
 			}
     	}
@@ -719,6 +756,7 @@ public class DumpEtwWrites extends GhidraScript {
         return constants;
     }
         
+    // resolve an intermediate pcode operation to a list of possible constant values
     private List<Long> resolvePcodeOpToConstant(PcodeOp node, Stack<Function> callPath, int astDepth) throws Exception {    	
     	if(node == null)
     		throw new NotFoundException("node == null");
@@ -728,85 +766,79 @@ public class DumpEtwWrites extends GhidraScript {
     	
     	debugPrintf("%s (depth=%d)\n", node.toString(), astDepth);
     	
-    	int opcode = node.getOpcode();
 		List<Long> input0;
 		List<Long> input1;
+		List<Long> output = new LinkedList<Long>();
+		
+		int opcode = node.getOpcode();
 		switch (opcode) {
 			case PcodeOp.CAST:
 			case PcodeOp.COPY:
 			case PcodeOp.INT_ZEXT: // zero-extend
-				return resolveVarnodeToConstant(node.getInput(0), callPath, astDepth+1);
+				output = resolveVarnodeToConstant(node.getInput(0), callPath, astDepth+1);
+				break;
 				
 			case PcodeOp.INT_2COMP: // twos complement
 				input0 = resolveVarnodeToConstant(node.getInput(0), callPath, astDepth+1);
-				return input0.stream().map(a->-a).collect(Collectors.toList());
+				output = input0.stream().map(a->-a).collect(Collectors.toList());
+				break;
 			
 			case PcodeOp.INT_NEGATE:
 				input0 = resolveVarnodeToConstant(node.getInput(0), callPath, astDepth+1);
-				return input0.stream().map(a->~a).collect(Collectors.toList());
+				output = input0.stream().map(a->~a).collect(Collectors.toList());
+				break;
 			
 			case PcodeOp.LOAD:
-				return resolveVarnodeToConstant(node.getInput(1), callPath, astDepth+1); 
+				output =  resolveVarnodeToConstant(node.getInput(1), callPath, astDepth+1);
+				break;
 					
 			case PcodeOp.INT_ADD:
 			case PcodeOp.PTRSUB:  // pointer to structure and offset to subcomponent
 				input0 = resolveVarnodeToConstant(node.getInput(0), callPath, astDepth+1);
 				input1 = resolveVarnodeToConstant(node.getInput(1), callPath, astDepth+1);
-				if (input0.size() == input1.size())
-					return LongStream.range(0,input0.size()).map(a -> input0.get((int)a) + input1.get((int)a)).boxed().collect(Collectors.toList());
-				
-				if (input0.size() != input1.size()) {
-					// second chance - can we resolve to a single pair of values?
-					List<Long> input0_2 = input0.stream().distinct().collect(Collectors.toList());
-					List<Long> input1_2 = input1.stream().distinct().collect(Collectors.toList());
-					if(input0_2.size() == 1 && input0_2.size() == input1_2.size())
-						return LongStream.range(0,input0_2.size()).map(a -> input0_2.get((int)a) + input1_2.get((int)a)).boxed().collect(Collectors.toList());
-				}
-				throw new InvalidInputException();				
+				for(int i = 0; i < input0.size(); i++)
+					for(int j = 0; j < input1.size(); j++)
+						output.add(input0.get(i) + input1.get(j));
+				break;		
 			
 			case PcodeOp.INT_MULT:
 				input0 = resolveVarnodeToConstant(node.getInput(0), callPath, astDepth+1);
 				input1 = resolveVarnodeToConstant(node.getInput(1), callPath, astDepth+1);
-				if(input0.size() != input1.size())
-					throw new InvalidInputException();			
-				return LongStream.range(0,input0.size()).map(a -> input0.get((int)a) * input1.get((int)a)).boxed().collect(Collectors.toList());
+				for(int i = 0; i < input0.size(); i++)
+					for(int j = 0; j < input1.size(); j++)
+						output.add(input0.get(i) * input1.get(j));
+				break;
 				
 			case PcodeOp.INT_NOTEQUAL:
 			input0 = resolveVarnodeToConstant(node.getInput(0), callPath, astDepth+1);
 			input1 = resolveVarnodeToConstant(node.getInput(1), callPath, astDepth+1);
-			if(input0.size() != input1.size())
-				throw new InvalidInputException();			
-			return LongStream.range(0,input0.size()).map(a -> input0.get((int)a) != input1.get((int)a) ? 1 : 0).boxed().collect(Collectors.toList());
+			for(int i = 0; i < input0.size(); i++)
+				for(int j = 0; j < input1.size(); j++)
+					output.add((input0.get(i) != input1.get(j)) ? 1L : 0L);
+			break;
 				
 			case PcodeOp.PTRADD:  
 				input0 = resolveVarnodeToConstant(node.getInput(0), callPath, astDepth+1);
-				List<Long> index = resolveVarnodeToConstant(node.getInput(1), callPath, astDepth+1);
+				input1 = resolveVarnodeToConstant(node.getInput(1), callPath, astDepth+1);
 				List<Long> elementSize = resolveVarnodeToConstant(node.getInput(2), callPath, astDepth+1);
+				for(int i = 0; i < input0.size(); i++)
+					for(int j = 0; j < input1.size(); j++)
+						for(int k = 0; k < elementSize.size(); k++)
+							output.add(input0.get(i) + (input1.get(j) * elementSize.get(k)));
+				break;
 				
-				if (input0.size() == index.size() && input0.size() == elementSize.size())
-					return LongStream.range(0,input0.size()).map(a -> input0.get((int)a) + index.get((int)a) * elementSize.get((int)a)).boxed().collect(Collectors.toList());
-				
-				// second chance - can we resolve to distinct values?
-				List<Long> input0_2 = input0.stream().distinct().collect(Collectors.toList());
-				List<Long> index_2 = index.stream().distinct().collect(Collectors.toList());
-				List<Long> elementSize_2 = elementSize.stream().distinct().collect(Collectors.toList());
-				if (input0_2.size() == index_2.size() && input0_2.size() == elementSize_2.size())
-					return LongStream.range(0,input0_2.size()).map(a -> input0_2.get((int)a) + index_2.get((int)a) * elementSize_2.get((int)a)).boxed().collect(Collectors.toList());
-
-				throw new InvalidInputException();			
-		
 			case PcodeOp.INT_AND:
 				input0 = resolveVarnodeToConstant(node.getInput(0), callPath, astDepth+1);
 				input1 = resolveVarnodeToConstant(node.getInput(1), callPath, astDepth+1);
-				if(input0.size() != input1.size())
-					throw new InvalidInputException();			
-				return LongStream.range(0,input0.size()).map(a -> input0.get((int)a) & input1.get((int)a)).boxed().collect(Collectors.toList());
-
+				for(int i = 0; i < input0.size(); i++)
+					for(int j = 0; j < input1.size(); j++)
+						output.add(input0.get(i) & input1.get(j));
+				break;
+				
 			case PcodeOp.MULTIEQUAL:
-				List<Long> output = new LinkedList<Long>();
 				for(Varnode n : node.getInputs())
 					output.addAll(resolveVarnodeToConstant(n, callPath, astDepth+1));
-				return output;
+				break;
 			
 			case PcodeOp.INDIRECT:
 				throw new NotFoundException("aborting due to possible indirect effects in " + callPath.peek()); // :TODO:
@@ -818,6 +850,9 @@ public class DumpEtwWrites extends GhidraScript {
 			default:
 				throw new NotYetImplementedException("PcodeOp " + node.toString() + " in " + callPath.peek());
 		}
+		
+		// remove duplicates
+		return output.stream().distinct().collect(Collectors.toList());
     }
         
     private void appendStructure(Address addr, StringBuffer buff, Boolean valuesOnly) throws Exception {   	
@@ -891,7 +926,7 @@ public class DumpEtwWrites extends GhidraScript {
 		OptionsService service = state.getTool().getService(OptionsService.class);
 		if (service != null) {
 			ToolOptions opt = service.getOptions("Decompiler");
-			options.grabFromToolAndProgram(null,opt,program);    	
+			options.grabFromToolAndProgram(null,opt,program);
 		}
         decomplib.setOptions(options);
         
@@ -900,58 +935,25 @@ public class DumpEtwWrites extends GhidraScript {
 		decomplib.setSimplificationStyle("decompile");
 	}
 	
-	private void setUpDataTypes() throws NotFoundException {
-		  DataTypeManager dtm = getDataTypeManagerByName("windows_vs12_64");
-	      if(dtm == null)
-	    	  throw new NotFoundException("DataTypeManager(windows_vs12_64) == null");
-	    	  
-		  eventDescriptorType = dtm.getDataType("/evntprov.h/EVENT_DESCRIPTOR");
-	      if(eventDescriptorType == null)
-	    	  throw new NotFoundException("eventDescriptorType == null");
-	    	  
-//	      dtm = getDataTypeManagerByName("ntoskrnl.exe");
-//	      if(dtm == null)
-//	    	  throw new NotFoundException("DataTypeManager(ntoskrnl.exe) == null");
-	      
-	      ulonglongType = dtm.getDataType("/winnt.h/ULONGLONG");
-	      if(ulonglongType == null)
-	    	  throw new NotFoundException("ulonglongType == null");
-	        
-	      ushortType = dtm.getDataType("/WinDef.h/USHORT");
-	      if(ushortType == null)
-	    	  throw new NotFoundException("ushortType == null");
-	      
-	      ucharType = dtm.getDataType("/winsmcrd.h/UCHAR");
-	      if(ucharType == null)
-	    	  throw new NotFoundException("ucharType == null");
-	           
-  	      dtm = getDataTypeManagerByName("BuiltInTypes");
-  	      if(dtm == null)
-  	    	  throw new NotFoundException("DataTypeManager(BuiltInTypes) == null");
-	                      
-	      guidType = dtm.getDataType("/GUID");
-	      if(guidType == null)
-	    	  throw new NotFoundException("guidType == null");
+	private void setUpDataTypes() throws NotFoundException {    	  
+		  eventDescriptorType = getDataType("EVENT_DESCRIPTOR");
+	      ulonglongType = getDataType("ULONGLONG");
+	      ushortType = getDataType("USHORT");
+	      ucharType = getDataType("UCHAR");
+	      guidType = getDataType("GUID");
 	}
    
-    //------------------------------------------------------------------------
-	// getDataTypeManagerByName
-	//
-	// Retrieves data type manager by name.
-	//
-	// Returns:
-	//		Success: DataTypeManager
-	//		Failure: null
-	//------------------------------------------------------------------------
-	private DataTypeManager getDataTypeManagerByName(String name) {
+	private DataType getDataType(String name) throws NotFoundException {
 		DataTypeManagerService service = state.getTool().getService(DataTypeManagerService.class);
 
 		// Loop through all managers in the data type manager service
 		for (DataTypeManager manager : service.getDataTypeManagers()) {
-			if (manager.getName().equals(name))
-				return manager;
+			List<DataType> dataTypes = new ArrayList<DataType>();
+			manager.findDataTypes(name, dataTypes);
+			if(dataTypes.size() != 0)
+				return dataTypes.get(0);
 		}
-		return null;
+		throw new NotFoundException(name);
 	}
 	
 	private void debugPrintf(String template, Object... args) {    
@@ -971,7 +973,6 @@ public class DumpEtwWrites extends GhidraScript {
     	public int callDepth;
     	public int exportedCallDepth;
     	public Stack<Function> callPath;
-    	
     	public QueuedFunction(Function queuedFunction, Function callingFunction, int callDepth, int exportedCallDepth, Stack<Function> callPath )
     	{
     		this.queuedFunction = queuedFunction;

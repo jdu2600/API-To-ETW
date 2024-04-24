@@ -1,7 +1,7 @@
-# Api-To-Etw
+# API-To-ETW
 [![stability-experimental](https://img.shields.io/badge/stability-experimental-orange.svg)](https://github.com/mkenney/software-guides/blob/master/STABILITY-BADGES.md#experimental)
 
-A ghidra script to find all ETW write metadata for each API in a PE file, includng any associated public symbols.
+A ghidra script to find all ETW write metadata for each API in a PE file, including any associated public symbols.
 
 ## Why?
 Many ETW events are extremely useful for cyber security, but are not documented. :-(
