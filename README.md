@@ -4,13 +4,13 @@
 A ghidra script to find all ETW write metadata for each API in a PE file, including any associated public symbols.
 
 ## Why?
-Many ETW events are extremely useful for cyber security, but are not documented. :-(
+Many ETW events are extremely useful for cyber security, but are not (well) documented. :-(
+
+For example, the Kernel-Audit-API-Calls provider sounds interesting, but all of the events are called task_xx.
 
 ![Microsoft-Windows-Kernel-Audit-API-Calls events](Microsoft-Windows-Kernel-Audit-API-Calls.png)
 
-Previously, if you're lucky, Matt would do some reversing and [tweet](https://twitter.com/mattifestation/status/1140655593318993920) about them.
-
-Now you can run my ghidra script on ntoskrnl.exe and grep the results...
+Previously, this was a manual process. Now you can run this Ghidra script on ntoskrnl.exe and grep the results...
 
 | Function | Provider Guid | EVENT_DESCRIPTOR Symbol | Id | Version | Channel | Level | Opcode | Task | Keyword |
 |--- |--- |--- |--- |--- |--- |--- |--- |--- |--- |
@@ -31,22 +31,19 @@ Now you can run my ghidra script on ntoskrnl.exe and grep the results...
    * a full dump of all ETW events is much, much longer
 
 ## How good is it?
-The quality of the output depends on the quality of the decompilation. With the help of public symbols, ghidra is pretty good out of the box for Windows binaries. But if you're not getting the results you want, some manual reversing might help. 
+The quality of the output depends on the quality of the decompilation. With the help of public symbols, Ghidra is pretty good out of the box for Windows binaries. But if you're not getting the results you want, some manual reversing might help. 
 
 Sometimes you'll encounter a novel design pattern not supported by the script. For example, lsasrv.dll stores provider handles in [a generic table using Adelson-Velsky/Landis (AVL) trees](https://docs.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddk/nf-ntddk-rtlinitializegenerictableavl). So, in order to automatically extract the provider guids, the script needs to understand the GenericTableAvl APIs... 
 
 I'm still missing support for some event write edge cases, but I've tried to flag these in the script output.
 
+## How do I use it?
+ 1 Import the file
+
+
 ## TODO
  * handle classic provider registration - especially WPP
- * improve handling of TraceLogging providers
- * add more sample outputs - e.g. lsasrv.dll, samsrv.dll, win32k.sys
  * handle classic events - [TraceEvent](https://docs.microsoft.com/en-us/windows/win32/api/evntrace/nf-evntrace-traceevent) etc
- * handle edges cases - EVENT_DESCRIPTOR local variable (16 bytes / XMM instructions)
- * handle edge case - wrapper functions without a simple 1:1 parameter mapping
- * improve [INDIRECT](https://ghidra.re/courses/languages/html/additionalpcode.html) pcode handling? - aka ghidra's "data-flow algorithms do not have enough information to follow the data-flow directly" :-/
- * does EtwWriteUMSecurityEvent need special handling?
- * ghidra headless automation?
  
 ## References
  * https://www.riverloopsecurity.com/blog/2019/05/pcode/
@@ -57,6 +54,7 @@ I'm still missing support for some event write edge cases, but I've tried to fla
  * https://github.com/hunters-forge/API-To-Event
  * [How do I detect technique X in Windows?](https://drive.google.com/file/d/19AhMG0ZCOt0IVsPZgn4JalkdcUOGq4DK/view), DerbyCon 2019
  * https://pathtofile.run/codereview/re/python/2020/01/11/ghidra.html
+ * https://blog.tofile.dev/2020/01/11/ghidra.html
  * https://blog.xpnsec.com/analysing-rpc-with-ghidra-neo4j/
  
 ## Related Work
