@@ -64,7 +64,7 @@ public class DumpEtwWrites extends GhidraScript {
     private int decompileTimeoutSeconds = 60;
     // **********************
 
-    private String functionsFile = "C:\\functions.txt"; // analyse these functions
+    private String functionsFile = "functions.txt"; // analyse these functions
     private String ignoreFile = "ignore.txt";       // ignore these functions
 
     private DataType eventDescriptorType = null;
@@ -111,7 +111,7 @@ public class DumpEtwWrites extends GhidraScript {
         // or a list of RPC methods e.g. using xpn's RpcEnum
         try {
             functions = new HashSet<String>(Files.readAllLines(Paths.get(functionsFile)));
-            printf(" * analysing %d functions\n", functions.size());
+            printf(" * analysing %d functions from %s\n", functions.size(), FileSystems.getDefault().getPath(functionsFile));
         }
         catch(Exception e) {
             printf(" * %s not provided - analysing all exports instead\n", functionsFile);
@@ -131,10 +131,10 @@ public class DumpEtwWrites extends GhidraScript {
         }
         
         // prepare the output file
-        String csvFilename = currentProgram.getName() + ".csv";
-        printf(" * output will be written to %s\n", csvFilename);
-        new File(csvFilename).delete();
-        csv = new PrintWriter(new File(csvFilename));
+        File csvFile = new File(currentProgram.getName() + ".csv");
+        csvFile.delete();
+        printf(" * output will be written to %s\n", csvFile.getAbsolutePath());
+        csv = new PrintWriter(csvFile);
         csv.println("Function,ProviderGuid,ProviderSymbol,ReghandleSymbol,WriteFunction,EventDescriptorSymbol,Id,Version,Channel,Level,Opcode,Task,Keyword,ContainingFunction,CallDepth,ExportedCallDepth,CallPath");
         
         setUpDataTypes();
@@ -143,7 +143,7 @@ public class DumpEtwWrites extends GhidraScript {
             println("Decompiler Setup Error: " + decomplib.getLastMessage());
             return;
         }
-        
+               
         try {
             /* first we cache the REGHANDLE address and the GUID of all register ETW Providers so that we can later  
              * match ETW events to the Provider GUIDs
@@ -168,7 +168,7 @@ public class DumpEtwWrites extends GhidraScript {
                 for (Reference ref : refs) {
                     if (monitor.isCancelled())
                         break;
-                    analyseEtwRegisterCall(ref);
+                	analyseEtwRegisterCall(ref);
                 }
             }
             
@@ -240,7 +240,13 @@ public class DumpEtwWrites extends GhidraScript {
             throw new Exception("[CALL EtwRegister] Decompile Error: " + decomplib.getLastMessage());
         
         try {
-            cacheProviderReghandle(refFunc, cCode, refAddr);
+        	boolean found = cacheProviderReghandle(refFunc, cCode, refAddr);
+            if(!found) {
+            	// Could not resolve provider GUID(s) yet.
+            	// :TODO: Search a level deeper.
+                Reference[] refRefs = this.getSymbolAt(refFunc.getEntryPoint()).getReferences(null);
+                logTODO("Search the " +  refRefs.length + " calls to " + refFunc.getName() + " for EtwRegister calls");
+            }
         } catch(NotYetImplementedException e) {
             logTODO(e.getMessage());
         }
@@ -266,7 +272,7 @@ public class DumpEtwWrites extends GhidraScript {
                 String etwRegisterCall = getFunctionAt(pcodeOp.getInput(0).getAddress()).getName();
                 
                 List<Long> pGuids = null;
-                List<Long> reghandles = null;
+                List<Long> reghandles = new LinkedList<Long>();
                 // we need to pass the calling function in order to back trace through any parameters
                 Stack<Function> callingFunc = new Stack<Function>();
                 callingFunc.push(f);
@@ -332,15 +338,23 @@ public class DumpEtwWrites extends GhidraScript {
 	                }
 	                
 	                try {
-	                    pGuids = resolveFunctionParameterToConstant(pcodeOp, 1, callingFunc);
+	                	pGuids = resolveFunctionParameterToConstant(pcodeOp, 1, callingFunc);
+               		} catch (NotFoundException e) {
+               			printf("   --> skipping %s as guid not found @ 0x%x\n", etwRegisterCall, callAddress);
+               			return false;
+               		}
+	                
+	                try {                    
 	                    reghandles = resolveFunctionParameterToConstant(pcodeOp, 4, callingFunc);
 	                 } catch (NotFoundException e) {                                         
-	             		printf("   --> skipping %s due to local variable storage @ 0x%x\n", etwRegisterCall, callAddress);
-	                    return true;
+	             		 // a global REGHANDLE address was not found
+	                	 // assume local only use - and cache the containing function as the address
+	                	 debugPrintf("local REGHANDLE @ 0x%x\n", callAddress);
+	                	 reghandles.add(f.getEntryPoint().getOffset());
 	                }
                	}
 
-                  // :TODO: better guarantee the (guid, reghandle) correlation?
+                // :TODO: better guarantee the (guid, reghandle) correlation?
                 if(pGuids.size() != reghandles.size())
                     throw new NotFoundException("ETW register parameter list size mismatch");
                 for(int i = 0; i < pGuids.size(); i++) {
@@ -423,11 +437,7 @@ public class DumpEtwWrites extends GhidraScript {
             if(quickScan && (depth > maxCallDepth || exportDepth > maxExportCallDepth || eventCount == maxEvents))
                 continue;
             
-            if(etwRegisterFuncs.contains(funcName)) {
-                logTODO("handle local calls to EtwRegister - " + containingFunction);
-            }
-            else if(funcName.startsWith("_tlgWrite")) {
-                // ###
+            if(funcName.startsWith("_tlgWrite")) {
             	ClangTokenGroup cCode = decomplib.decompileFunction(callingFunction, decompileTimeoutSeconds, monitor).getCCodeMarkup();
                 if (cCode == null)
                     throw new Exception("[CALL _tlgWrite] Decompile Error: " + decomplib.getLastMessage());
@@ -439,21 +449,23 @@ public class DumpEtwWrites extends GhidraScript {
                         if(tlgWriteParameters.toString().equals(lastParameters))
                             continue; // remove duplicates
                         lastParameters = tlgWriteParameters.toString();
-                        printf("   --> %s(%s)\n", funcName, tlgWriteParameters);
+                        printf("   --> %s %s(%s)\n", containingFunction, funcName, tlgWriteParameters);
                         csv.printf("%s,%s,%s,%d,%d,%s\n", func.getName(), tlgWriteParameters, containingFunction, depth, exportDepth, callPath.toString().replace(',','-').replace(' ','>') );
                         eventCount++;
                     }
+                } catch(NotFoundException e) {
+                    logTODO(e.getMessage());
                 } catch(NotYetImplementedException e) {
-                    logTODO("getTlgWriteParameters() " + e.getMessage());
+                    logTODO(e.getMessage());
                 }
             }
             else if(classicEventFuncs.contains(funcName)) {
-                logTODO("implement classic provider support - " + funcName);
+                logTODO("Implement classic provider support for " + containingFunction);
             }
             else if(classicMessageFuncs.contains(funcName)) {
                 List<String> wppWriteParametersList = getWppWriteParameters(funcName, callingFunction, callPath);
                 for(String wppWriteParameters : wppWriteParametersList) {
-                    printf("   --> %s(%s)\n", funcName, wppWriteParameters);
+                    printf("   --> %s %s(%s)\n", containingFunction, funcName, wppWriteParameters);
                     csv.printf("%s,%s,%s,%d,%d,%s\n", func.getName(), wppWriteParameters, containingFunction, depth, exportDepth, callPath.toString().replace(',','-').replace(' ','>') );
                     eventCount++;
                 }
@@ -470,12 +482,14 @@ public class DumpEtwWrites extends GhidraScript {
                         if(etwWriteParameters.toString().equals(lastParameters))
                             continue; // remove duplicates
                         lastParameters = etwWriteParameters.toString();
-                        printf("   --> %s(%s)\n", funcName, etwWriteParameters);
+                        printf("   --> %s %s(%s)\n", containingFunction, funcName, etwWriteParameters);
                         csv.printf("%s,%s,%s,%d,%d,%s\n", func.getName(), etwWriteParameters, containingFunction, depth, exportDepth, callPath.toString().replace(',','-').replace(' ','>') );
                         eventCount++;
                     }
+                } catch(NotFoundException e) {
+                    logTODO(e.getMessage());
                 } catch(NotYetImplementedException e) {
-                    logTODO("getEtwWriteParameters() " + e.getMessage());
+                    logTODO(e.getMessage());
                 }
             }
             else {
@@ -543,12 +557,13 @@ public class DumpEtwWrites extends GhidraScript {
                     }
                     catch (NotFoundException e)
                     {
-                        // non fatal
-                        logTODO("ETW write REGHANDLE resolves to local variable in " + callPath.peek()); // :TODO:
+                        debugPrintf("ETW write REGHANDLE resolves to local variable in " + callPath.peek());
+                        // Attempt lookup via function address instead  
+                        reghandle =  callPath.peek().getEntryPoint().getOffset();
                     }
                     catch (NotYetImplementedException e) {
                         // non fatal
-                        logTODO("REGHANDLE " + e.getMessage());
+                        logTODO("Handle REGHANDLE in " + e.getMessage());
                     }
                 }
                 
@@ -584,22 +599,29 @@ public class DumpEtwWrites extends GhidraScript {
                 // NTSTATUS EtwWrite*(REGHANDLE RegHandle, PCEVENT_DESCRIPTOR EventDescriptor, LPCGUID ActivityId, ULONG UserDataCount, PEVENT_DATA_DESCRIPTOR UserData);
                 Address event = null;
                 if(pcodeOp.getNumInputs() > 2) {
-                    List<Long> pEvents = null;
+                    List<Long> pEvents = new LinkedList<Long>();
                     try
                     {
                         debugPrintf("resolveFunctionParameterToConstant(2)\n");
                         pEvents = resolveFunctionParameterToConstant(pcodeOp, 2, callPath);
+                        if(pEvents.size() == 0)
+                        	logTODO("EtwWrite EVENT_DESCRIPTOR not found in " + callPath.peek());
                     }
                     catch (NotFoundException e)
                     {
-                        throw new NotYetImplementedException("ETW write EVENT_DESCRIPTOR resolves to local variable in " + callPath.peek()); // :TODO:
+                    	logTODO("EtwWrite EVENT_DESCRIPTOR not found in " + callPath.peek());
+                        etwWriteParameters = new StringBuffer();
+                        etwWriteParameters.append(providerGuid + ",");
+                        etwWriteParameters.append(providerSymbol + ",");
+                        etwWriteParameters.append(reghandleSymbol + ",");
+                        etwWriteParameters.append(etwWriteCall + ",");
+                        etwWriteParameters.append(",,,,,,,"); // not found
+                        etwWriteParametersList.add(etwWriteParameters);
                     }
                     catch (NotYetImplementedException e)
                     {
                         throw new NotYetImplementedException("EVENT_DESCRIPTOR " + e.getMessage());
                     }
-                    if(pEvents.size() == 0)
-                        throw new NotFoundException("ETW write with no EVENT_DESCRIPTOR");
                     
                     for(long pEvent : pEvents) {
                         if(pEvent == 0)
@@ -621,7 +643,7 @@ public class DumpEtwWrites extends GhidraScript {
                         catch(CodeUnitInsertionException e)
                         {
                             debugPrintf("EVENT_DESCRIPTOR parsing failed @ 0x%x", pEvent);
-                            etwWriteParameters.append(",,,,,,");
+                            etwWriteParameters.append(",,,,,,,");
                         }
                         etwWriteParametersList.add(etwWriteParameters);
                     }                    
@@ -687,8 +709,7 @@ public class DumpEtwWrites extends GhidraScript {
                     catch (NotFoundException e)
                     {
                         // non fatal
-                        logTODO("TLG write REGHANDLE resolves to local variable in " + callPath.peek()); // :TODO: ###
-                        reghandles = resolveFunctionParameterToConstant(pcodeOp, 1, callPath);  // :TODO: ###
+                        logTODO("_tlgWrite REGHANDLE not found in " + callPath.peek());
                     }
                     catch (NotYetImplementedException e) {
                         // non fatal
@@ -733,7 +754,7 @@ public class DumpEtwWrites extends GhidraScript {
                         tlgWriteParameters.append(reghandleSymbol + ","); // usually empty for TLG
                         tlgWriteParameters.append(tlgWriteCall + ",");
                         
-                        /// ###
+                        // https://posts.specterops.io/data-source-analysis-and-dynamic-windows-re-using-wpp-and-tracelogging-e465f8b653f7
                         // UCHAR Channel
                         // UCHAR Level
                         // UCHAR OpCode
@@ -746,18 +767,19 @@ public class DumpEtwWrites extends GhidraScript {
                         Byte opcode =  getByte(toAddr(pEvent + 2));
                         Long keyword = getLong(toAddr(pEvent + 3));
 	                	
-	                    Address nameAddr = toAddr(pEvent + 6);
+	                    Address nameAddr = toAddr(pEvent + 15);
 	                    clearListing(nameAddr);
 	                    createData(nameAddr, stringType);
 	                    String eventName = getDataAt(nameAddr).toString().substring(3); // strip type
                         
                         // TraceLogging doesn't have equivalent fields for id, task and version. 
 	                    tlgWriteParameters.append(eventName + ",");
-                        tlgWriteParameters.append(",,"); // Id, Version
+                        tlgWriteParameters.append("-,-,"); // Id, Version
                         tlgWriteParameters.append(channel + ",");
                         tlgWriteParameters.append(level + ",");
-                        tlgWriteParameters.append(","); // Task
-                        tlgWriteParameters.append(String.format("0x%x", keyword) + ",");
+                        tlgWriteParameters.append(opcode + ",");
+                        tlgWriteParameters.append("-,"); // Task
+                        tlgWriteParameters.append(String.format("0x%x", keyword));
                         tlgWriteParametersList.add(tlgWriteParameters);
                     }       
                 }
@@ -879,8 +901,6 @@ public class DumpEtwWrites extends GhidraScript {
         if (node.isAddress())
             return new LinkedList<Long>(Arrays.asList(node.getAddress().getOffset()));
                
-        // "node.isParameter()"
-        // note - isParameter check must occur before isRegister check
         HighVariable hvar = node.getHigh();
         if (hvar instanceof HighParam)
             return resolveToConstant(((HighParam)hvar).getSlot() + 1, callPath);
@@ -888,18 +908,22 @@ public class DumpEtwWrites extends GhidraScript {
         if (hvar instanceof HighGlobal)
             debugPrintf(":TODO: found a global... already handled?");
         
-        if ((hvar instanceof HighVariable) || (hvar instanceof HighLocal)) {
-        	printf("### " + callPath.peek().getName() + " hvar: " + hvar + " pcode: " + hvar.getRepresentative().getDef() + "\n");
-        	printf("### " + callPath.peek().getName() + " node: " + node.getDef() + "\n");
-        	return resolvePcodeOpToConstant(hvar.getRepresentative().getDef(), callPath, astDepth);
+        if (hvar instanceof HighLocal) {
+        	// printf("### HighLocal " + callPath.peek().getName() + " node: " + node.getDef() + "\n");
+        	return resolvePcodeOpToConstant(node.getDef(), callPath, astDepth);
         }
         
-        if(node.isRegister() && node.getDef() == null) {
-        	throw new NotFoundException("not a constant - resolves to a register");
+        if (hvar instanceof HighOther) {
+        	///printf("### HighOther " + callPath.peek().getName() + " hvar: " + hvar + "\n");
+        	///printf("###  getRepresentative: " + hvar.getRepresentative().getDef() + "\n");
+        	///printf("###  getDef: " + node.getDef() + "\n");
+        	if(hvar.getRepresentative().getDef() != null)
+        		return resolvePcodeOpToConstant(hvar.getRepresentative().getDef(), callPath, astDepth);
+        	if(node.getDef() != null)
+        		return resolvePcodeOpToConstant(node.getDef(), callPath, astDepth);
         }
-               
-        // else, trace varnode backwards to constant
-        return resolvePcodeOpToConstant(node.getDef(), callPath, astDepth);
+        
+        throw new NotFoundException();
     }
     
     // resolve a function call parameter to a list of possible constant values
@@ -1056,12 +1080,14 @@ public class DumpEtwWrites extends GhidraScript {
                 break;
             
             case PcodeOp.INDIRECT:
-            	// ignore possible indirect effects...
+            	debugPrintf("ignoring possible indirect effects in %s\n", callPath.peek());
             	output = resolveVarnodeToConstant(node.getInput(0), callPath, astDepth+1);
+            	break;
             
             case PcodeOp.CALL:
-                String target = getSymbolAt(node.getInput(0).getAddress()).getName();
-                throw new NotYetImplementedException("PcodeOp CALL " + target + " in " + callPath.peek());
+                debugPrintf("guessing TRUE for CALL in %s\n", callPath.peek());                
+                output.add(1L); // TRUE
+                break;
                 
             default:
                 throw new NotYetImplementedException("PcodeOp " + node.toString() + " in " + callPath.peek());
