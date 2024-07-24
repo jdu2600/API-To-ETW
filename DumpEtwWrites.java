@@ -53,11 +53,11 @@ public class DumpEtwWrites extends GhidraScript {
     // quickscan: stop processing after maxEvents have been found, or maxCallDepth/maxExportCallDepth has been reached
     private Boolean quickScan = true;
     // maxEvents: maximum events to report per API
-    private int maxEvents = 10;
+    private int maxEvents = 12;
     // maxCallDepth: maximum call depth to search for events
-    private int maxCallDepth = 10;
+    private int maxCallDepth = 8;
     // maxExportCallDepth: maximum depth of exported functions to search
-    private int maxExportCallDepth = 2;
+    private int maxExportCallDepth = 0;
     // debugPrint: verbose logging
     private Boolean debugPrint = false;
     // decompileTimeoutSeconds: per-function timeout for Ghidra decompilation
@@ -88,10 +88,6 @@ public class DumpEtwWrites extends GhidraScript {
         printf("\n\n--==[ DumpEtwWrites ]==--\n");
         printf(" * %s\n", currentProgram.getName());
         
-        // override default maxExportCallDepth if we are analysing all export
-        if(!Files.exists(Paths.get(functionsFile)))
-            maxExportCallDepth = 1;
-
         if(quickScan)
             printf(" * quick scan mode - maxEvents=%d maxCallDepth=%d maxExportCallDepth=%d\n", maxEvents, maxCallDepth, maxExportCallDepth);
         else
@@ -114,8 +110,16 @@ public class DumpEtwWrites extends GhidraScript {
             printf(" * analysing %d functions from %s\n", functions.size(), FileSystems.getDefault().getPath(functionsFile));
         }
         catch(Exception e) {
-            printf(" * %s not provided - analysing all exports instead\n", functionsFile);
-            functions = exports;
+            if(exports.contains("NtQuerySystemInformation")) {
+                functions = new HashSet<String>();
+                for(String func : exports)
+                    if(func.startsWith("Nt"))
+                        functions.add(func);
+                printf(" * %s not provided - analysing all %d syscalls instead\n", functionsFile, functions.size());
+            } else {
+                functions = exports;
+                printf(" * %s not provided - analysing all %d exports instead\n", functionsFile, functions.size());
+            }
             Files.write(FileSystems.getDefault().getPath("exports.txt"), exports);
         }
         
@@ -450,7 +454,7 @@ public class DumpEtwWrites extends GhidraScript {
                             continue; // remove duplicates
                         lastParameters = tlgWriteParameters.toString();
                         printf("   --> %s %s(%s)\n", containingFunction, funcName, tlgWriteParameters);
-                        csv.printf("%s,%s,%s,%d,%d,%s\n", func.getName(), tlgWriteParameters, containingFunction, depth, exportDepth, callPath.toString().replace(',','-').replace(' ','>') );
+                        csv.printf("%s,%s,%s,%d,%d,%s\n", func.getName(), tlgWriteParameters, containingFunction.replace(',','-'), depth, exportDepth, callPath.toString().replace(',','-').replace(' ','>') );
                         eventCount++;
                     }
                 } catch(NotFoundException e) {
@@ -466,7 +470,7 @@ public class DumpEtwWrites extends GhidraScript {
                 List<String> wppWriteParametersList = getWppWriteParameters(funcName, callingFunction, callPath);
                 for(String wppWriteParameters : wppWriteParametersList) {
                     printf("   --> %s %s(%s)\n", containingFunction, funcName, wppWriteParameters);
-                    csv.printf("%s,%s,%s,%d,%d,%s\n", func.getName(), wppWriteParameters, containingFunction, depth, exportDepth, callPath.toString().replace(',','-').replace(' ','>') );
+                    csv.printf("%s,%s,%s,%d,%d,%s\n", func.getName(), wppWriteParameters, containingFunction.replace(',','-'), depth, exportDepth, callPath.toString().replace(',','-').replace(' ','>') );
                     eventCount++;
                 }
             }
@@ -483,7 +487,7 @@ public class DumpEtwWrites extends GhidraScript {
                             continue; // remove duplicates
                         lastParameters = etwWriteParameters.toString();
                         printf("   --> %s %s(%s)\n", containingFunction, funcName, etwWriteParameters);
-                        csv.printf("%s,%s,%s,%d,%d,%s\n", func.getName(), etwWriteParameters, containingFunction, depth, exportDepth, callPath.toString().replace(',','-').replace(' ','>') );
+                        csv.printf("%s,%s,%s,%d,%d,%s\n", func.getName(), etwWriteParameters, containingFunction.replace(',','-'), depth, exportDepth, callPath.toString().replace(',','-').replace(' ','>') );
                         eventCount++;
                     }
                 } catch(NotFoundException e) {
@@ -492,11 +496,12 @@ public class DumpEtwWrites extends GhidraScript {
                     logTODO(e.getMessage());
                 }
             }
+            // Handling classic kernel events via this wrapper function adds more context
             else if(funcName.equals("EtwTraceKernelEvent")) {
                 List<String> kernelEventParametersList = getTraceKernelEventParameters(funcName, callingFunction, callPath);
                 for(String kernelEventParameters : kernelEventParametersList) {
                     printf("   --> %s %s(%s)\n", containingFunction, funcName, kernelEventParameters);
-                    csv.printf("%s,%s,%s,%d,%d,%s\n", func.getName(), kernelEventParameters, containingFunction, depth, exportDepth, callPath.toString().replace(',','-').replace(' ','>') );
+                    csv.printf("%s,%s,%s,%d,%d,%s\n", func.getName(), kernelEventParameters, containingFunction.replace(',','-'), depth, exportDepth, callPath.toString().replace(',','-').replace(' ','>') );
                     eventCount++;
                 }
             }
