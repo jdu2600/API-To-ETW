@@ -15,22 +15,22 @@ For example, the `Kernel-Audit-API-Calls` provider sounds interesting, but all o
 Previously, this was a manual reversing process. Now you can run this Ghidra script on `ntoskrnl.exe` and grep the results. :smiley:
 
 | Function | EVENT_DESCRIPTOR Symbol | Id | CallPath |
-|--- | --- |--- |--- |--- |--- |--- |--- |--- |
-| PsSetLoadImageNotifyRoutine | KERNEL_AUDIT_API_PSSETLOADIMAGENOTIFYROUTINE | 1 | [PsSetLoadImageNotifyRoutine->PsSetLoadImageNotifyRoutineEx] |
-| PsSetLoadImageNotifyRoutineEx | KERNEL_AUDIT_API_PSSETLOADIMAGENOTIFYROUTINE | 1 | [PsSetLoadImageNotifyRoutineEx] |
-| NtTerminateProcess | KERNEL_AUDIT_API_TERMINATEPROCESS | 2 | [NtTerminateProcess->PspLogAuditTerminateRemoteProcessEvent] |
-| NtCreateSymbolicLinkObject |  KERNEL_AUDIT_API_CREATESYMBOLICLINKOBJECT | 3 | [NtCreateSymbolicLinkObject] |
-| IoCreateSymbolicLink | KERNEL_AUDIT_API_CREATESYMBOLICLINKOBJECT | 3 | [IoCreateSymbolicLink->IoCreateSymbolicLink2->ObCreateSymbolicLink] |
-| NtSetContextThread | KERNEL_AUDIT_API_SETCONTEXTTHREAD | 4 | [NtSetContextThread] |
-| NtOpenProcess | KERNEL_AUDIT_API_OPENPROCESS | 5 | [NtOpenProcess->PsOpenProcess] |
-| NtAlpcOpenSenderProcess | KERNEL_AUDIT_API_OPENPROCESS | 5 | [NtAlpcOpenSenderProcess->PsOpenProcess] |
-| NtOpenThread | KERNEL_AUDIT_API_OPENTHREAD | 6 | [NtOpenThread->PsOpenThread] |
-| NtAlpcOpenSenderThread | KERNEL_AUDIT_API_OPENTHREAD | 6 | [NtAlpcOpenSenderThread->PsOpenThread] |
-| IoRegisterLastChanceShutdownNotification | KERNEL_AUDIT_API_IOREGISTERLASTCHANCESHUTDOWNNOTIFICATION | 7 | [IoRegisterLastChanceShutdownNotification->IopLogAuditIoRegisterNotificationEvent] |
-| IoRegisterShutdownNotification | KERNEL_AUDIT_API_IOREGISTERSHUTDOWNNOTIFICATION | 8 | [IoRegisterShutdownNotification->IopLogAuditIoRegisterNotificationEvent] |
+| --- | --- | --- | --- |
+| PsSetLoadImageNotifyRoutine | KERNEL_AUDIT_API_PSSETLOADIMAGENOTIFYROUTINE | 1 | PsSetLoadImageNotifyRoutine->PsSetLoadImageNotifyRoutineEx |
+| PsSetLoadImageNotifyRoutineEx | KERNEL_AUDIT_API_PSSETLOADIMAGENOTIFYROUTINE | 1 | PsSetLoadImageNotifyRoutineEx |
+| NtTerminateProcess | KERNEL_AUDIT_API_TERMINATEPROCESS | 2 | NtTerminateProcess->PspLogAuditTerminateRemoteProcessEvent |
+| NtCreateSymbolicLinkObject |  KERNEL_AUDIT_API_CREATESYMBOLICLINKOBJECT | 3 | NtCreateSymbolicLinkObjec |
+| IoCreateSymbolicLink | KERNEL_AUDIT_API_CREATESYMBOLICLINKOBJECT | 3 | IoCreateSymbolicLink->IoCreateSymbolicLink2->ObCreateSymbolicLink |
+| NtSetContextThread | KERNEL_AUDIT_API_SETCONTEXTTHREAD | 4 | NtSetContextThread |
+| NtOpenProcess | KERNEL_AUDIT_API_OPENPROCESS | 5 | NtOpenProcess->PsOpenProcess |
+| NtAlpcOpenSenderProcess | KERNEL_AUDIT_API_OPENPROCESS | 5 | NtAlpcOpenSenderProcess->PsOpenProcess |
+| NtOpenThread | KERNEL_AUDIT_API_OPENTHREAD | 6 | NtOpenThread->PsOpenThread |
+| NtAlpcOpenSenderThread | KERNEL_AUDIT_API_OPENTHREAD | 6 | NtAlpcOpenSenderThread->PsOpenThread |
+| IoRegisterLastChanceShutdownNotification | KERNEL_AUDIT_API_IOREGISTERLASTCHANCESHUTDOWNNOTIFICATION | 7 | IoRegisterLastChanceShutdownNotification->IopLogAuditIoRegisterNotificationEvent |
+| IoRegisterShutdownNotification | KERNEL_AUDIT_API_IOREGISTERSHUTDOWNNOTIFICATION | 8 | IoRegisterShutdownNotification->IopLogAuditIoRegisterNotificationEvent |
 
 There are also trace providers (TraceLogging and WPP) which are not documented by design. This level of debug tracing is intended for the developer only, but might also prove useful for security. For example, the 
-`Microsoft.Windows.Kernel.SysEnv` TraceLogging provider includes a `SetVariable` event.
+`Microsoft.Windows.Kernel.SysEnv` TraceLogging provider includes a `SetVariable` event which might be useful.
 
 
 ## Sample Output
