@@ -25,6 +25,7 @@
 //@author jdu2600
 
 import java.io.*;
+import java.lang.Math.*;
 import java.nio.file.*;
 import java.util.*;
 import java.util.stream.*;
@@ -50,12 +51,14 @@ public class DumpEtwWrites extends GhidraScript {
 
     // **********************
     // Configurable Settings
-    // quickscan: stop processing after maxEvents have been found, or maxCallDepth/maxExportCallDepth has been reached
+    // quickscan: stop processing after maxEvents have been found, or extraCallDepth/maxExportCallDepth has been reached
     private Boolean quickScan = true;
     // maxEvents: maximum events to report per API
-    private int maxEvents = 12;
+    private int maxEvents = 100;
     // maxCallDepth: maximum call depth to search for events
-    private int maxCallDepth = 8;
+    private int maxCallDepth = 5;
+    // extraCallDepth: maximum additional call depth to search for events
+    private int extraCallDepth = 1;
     // maxExportCallDepth: maximum depth of exported functions to search
     private int maxExportCallDepth = 0;
     // debugPrint: verbose logging
@@ -89,7 +92,7 @@ public class DumpEtwWrites extends GhidraScript {
         printf(" * %s\n", currentProgram.getName());
         
         if(quickScan)
-            printf(" * quick scan mode - maxEvents=%d maxCallDepth=%d maxExportCallDepth=%d\n", maxEvents, maxCallDepth, maxExportCallDepth);
+            printf(" * quick scan mode - maxCallDepth=%d extraCallDepth=%d maxExportCallDepth=%d\n", maxCallDepth, extraCallDepth, maxExportCallDepth);
         else
             printf(" * full scan mode - finding all reachable ETW writes\n");
     
@@ -112,9 +115,15 @@ public class DumpEtwWrites extends GhidraScript {
         catch(Exception e) {
             if(exports.contains("NtQuerySystemInformation")) {
                 functions = new HashSet<String>();
-                for(String func : exports)
+                for(String func : exports) {
                     if(func.startsWith("Nt"))
                         functions.add(func);
+                    if(func.startsWith("Zw"))
+                        functions.add(func.replaceFirst("Zw", "Nt"));
+                }
+                for(String func : functions)
+                    if(func.startsWith("Nt"))
+                        exports.add(func);
                 printf(" * %s not provided - analysing all %d syscalls instead\n", functionsFile, functions.size());
             } else {
                 functions = exports;
@@ -181,7 +190,7 @@ public class DumpEtwWrites extends GhidraScript {
             for(String functionName : functions)    {
                 List<Function> functionList = getGlobalFunctions(functionName);
                 if(functionList.size() == 0) {
-                    printf("   --> found 0 instances of %s\n", functionName);
+                    printf(" * %s - function not found\n", functionName);
                     continue;
                 }
                 if(functionList.size() > 1)
@@ -400,8 +409,6 @@ public class DumpEtwWrites extends GhidraScript {
     List<String> classicMessageFuncs = Arrays.asList("TraceMesssage", "EtwTraceMessage", "TraceMessageVa", "EtwTraceMessageVa");
     List<String> classicEventFuncs = Arrays.asList("TraceEvent", "EtwTraceEvent", "TraceEventInstance",  "EtwTraceEventInstance");
     public void analyseFunction(Function func) throws Exception {
-        printf(" * analysing %s\n", func.getName());
-                
          Queue<QueuedFunction> queue = new LinkedList<QueuedFunction>();
          List<String> processed = new LinkedList<String>();
          Stack<Function> callPath = new Stack<Function>(); // helps with back tracing constants, and determining relevance  
@@ -410,6 +417,8 @@ public class DumpEtwWrites extends GhidraScript {
          int eventCount = 0;
          int depth = 0;
          int exportDepth = 0;
+         int maxLocalCallDepth = maxCallDepth;
+         String lastParameters = null; 
         
         // find all reachable ETW writes
         for(Function calledFunction : func.getCalledFunctions(monitor))
@@ -438,9 +447,9 @@ public class DumpEtwWrites extends GhidraScript {
             if (processed.contains(funcName) || ignored.contains(funcName))
                 continue;
                         
-            if(quickScan && (depth > maxCallDepth || exportDepth > maxExportCallDepth || eventCount == maxEvents))
+            if(quickScan && (depth > maxLocalCallDepth || exportDepth > maxExportCallDepth || eventCount == maxEvents))
                 continue;
-            
+
             if(funcName.startsWith("_tlgWrite")) {
                 ClangTokenGroup cCode = decomplib.decompileFunction(callingFunction, decompileTimeoutSeconds, monitor).getCCodeMarkup();
                 if (cCode == null)
@@ -448,14 +457,13 @@ public class DumpEtwWrites extends GhidraScript {
                 List<StringBuffer> tlgWriteParametersList = new LinkedList<StringBuffer>();
                 try {
                     getTlgWriteParameters(funcName, cCode, tlgWriteParametersList, callPath, 0);
-                    String lastParameters = null; 
                     for(StringBuffer tlgWriteParameters : tlgWriteParametersList) {
                         if(tlgWriteParameters.toString().equals(lastParameters))
                             continue; // remove duplicates
                         lastParameters = tlgWriteParameters.toString();
-                        printf("   --> %s %s(%s)\n", containingFunction, funcName, tlgWriteParameters);
                         csv.printf("%s,%s,%s,%d,%d,%s\n", func.getName(), tlgWriteParameters, containingFunction.replace(',','-'), depth, exportDepth, callPath.toString().replace(',','-').replace(' ','>') );
                         eventCount++;
+                        maxLocalCallDepth = Math.min(maxLocalCallDepth, depth + extraCallDepth);
                     }
                 } catch(NotFoundException e) {
                     logTODO(e.getMessage());
@@ -469,9 +477,9 @@ public class DumpEtwWrites extends GhidraScript {
             else if(classicMessageFuncs.contains(funcName)) {
                 List<String> wppWriteParametersList = getWppWriteParameters(funcName, callingFunction, callPath);
                 for(String wppWriteParameters : wppWriteParametersList) {
-                    printf("   --> %s %s(%s)\n", containingFunction, funcName, wppWriteParameters);
                     csv.printf("%s,%s,%s,%d,%d,%s\n", func.getName(), wppWriteParameters, containingFunction.replace(',','-'), depth, exportDepth, callPath.toString().replace(',','-').replace(' ','>') );
                     eventCount++;
+                    maxLocalCallDepth = Math.min(maxLocalCallDepth, depth + extraCallDepth);
                 }
             }
             else if(etwWriteFuncs.contains(funcName)) {
@@ -481,14 +489,13 @@ public class DumpEtwWrites extends GhidraScript {
                 List<StringBuffer> etwWriteParametersList = new LinkedList<StringBuffer>();
                 try {
                     getEtwWriteParameters(funcName, cCode, etwWriteParametersList, callPath, 0);
-                    String lastParameters = null; 
                     for(StringBuffer etwWriteParameters : etwWriteParametersList) {
                         if(etwWriteParameters.toString().equals(lastParameters))
                             continue; // remove duplicates
                         lastParameters = etwWriteParameters.toString();
-                        printf("   --> %s %s(%s)\n", containingFunction, funcName, etwWriteParameters);
                         csv.printf("%s,%s,%s,%d,%d,%s\n", func.getName(), etwWriteParameters, containingFunction.replace(',','-'), depth, exportDepth, callPath.toString().replace(',','-').replace(' ','>') );
                         eventCount++;
+                        maxLocalCallDepth = Math.min(maxLocalCallDepth, depth + extraCallDepth);
                     }
                 } catch(NotFoundException e) {
                     logTODO(e.getMessage());
@@ -500,13 +507,19 @@ public class DumpEtwWrites extends GhidraScript {
             else if(funcName.equals("EtwTraceKernelEvent")) {
                 List<String> kernelEventParametersList = getTraceKernelEventParameters(funcName, callingFunction, callPath);
                 for(String kernelEventParameters : kernelEventParametersList) {
-                    printf("   --> %s %s(%s)\n", containingFunction, funcName, kernelEventParameters);
+                    if(kernelEventParameters.toString().equals(lastParameters))
+                        continue; // remove duplicates
+                    lastParameters = kernelEventParameters.toString();
                     csv.printf("%s,%s,%s,%d,%d,%s\n", func.getName(), kernelEventParameters, containingFunction.replace(',','-'), depth, exportDepth, callPath.toString().replace(',','-').replace(' ','>') );
                     eventCount++;
+                    maxLocalCallDepth = Math.min(maxLocalCallDepth, depth + extraCallDepth);
                 }
             }
             else {
-                if(exports.contains(funcName))
+                String functionCrumb = func.getName();
+                if(functionCrumb.length() > 5)
+                    functionCrumb = functionCrumb.substring(2, functionCrumb.length() - 5);
+                if(exports.contains(funcName) && !funcName.contains(functionCrumb))
                     exportDepth++;
                 
                 processed.add(funcName);
@@ -518,13 +531,18 @@ public class DumpEtwWrites extends GhidraScript {
                     if(calledFunction.getName() == null)
                         throw new Exception("FUN_" + calledFunction.getEntryPoint().toString() + " is not defined");
                        callPath = (Stack<Function>) next.callPath.clone();
-                    callPath.add(thisFunction);
-                    queue.add(new QueuedFunction(calledFunction, thisFunction, depth+1, exportDepth, callPath));
+                    if(funcName.startsWith("FUN_"))
+                        queue.add(new QueuedFunction(calledFunction, thisFunction, depth, exportDepth, callPath));
+                    else {
+                        callPath.add(thisFunction);
+                        queue.add(new QueuedFunction(calledFunction, thisFunction, depth+1, exportDepth, callPath));
+                    }
                 }
             }
         }
-        if(quickScan && (depth > maxCallDepth || exportDepth > maxExportCallDepth || eventCount == maxEvents))
-            printf("   --> quickscan limit reached. callDepth=%d exportCallDepth=%d eventCount=%d\n", depth, exportDepth, eventCount);
+
+        printf(" * %s - found %d events in %d functions. callDepth=%d exportDepth=%d\n",
+            func.getName(), eventCount, processed.size(), maxLocalCallDepth, exportDepth);
         csv.flush();
     }    
       
@@ -656,7 +674,7 @@ public class DumpEtwWrites extends GhidraScript {
                         catch(CodeUnitInsertionException e)
                         {
                             debugPrintf("EVENT_DESCRIPTOR parsing failed @ 0x%x", pEvent);
-                            etwWriteParameters.append(",,,,,,,");
+                            etwWriteParameters.append(",,,,,,");
                         }
                         etwWriteParametersList.add(etwWriteParameters);
                     }                    
